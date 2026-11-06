@@ -32,6 +32,15 @@ const equal=(a,b)=>{const x=Buffer.from(a),y=Buffer.from(b);return x.length===y.
 const cookieSign=s=>crypto.createHmac('sha256',COOKIE_SECRET).update(s).digest('hex');
 const sessions=new Map(); const runtime=new Map(); const pending=new Map();
 const cleanPhone=s=>String(s||'').replace(/\D/g,'');
+const messageText=message=>{
+  let content=message;
+  for(let i=0;i<5;i++){
+    const wrapped=content?.ephemeralMessage?.message||content?.viewOnceMessage?.message||content?.viewOnceMessageV2?.message||content?.documentWithCaptionMessage?.message;
+    if(!wrapped)break;
+    content=wrapped;
+  }
+  return content?.conversation||content?.extendedTextMessage?.text||content?.imageMessage?.caption||content?.videoMessage?.caption||'';
+};
 const customerPath=id=>path.join(customersDir,id);
 const customerFile=id=>path.join(customerPath(id),'customer.json');
 const loadCustomer=id=>read(customerFile(id),null);
@@ -62,7 +71,17 @@ app.post('/api/admin/customers/:id/revoke',tokenAuth,async(req,res)=>{const c=aw
 app.post('/api/admin/customers/:id/renew',tokenAuth,async(req,res)=>{const c=await loadCustomer(req.params.id);if(!c)return res.sendStatus(404);const days=Number(req.body.days);if(![15,20,30,60].includes(days))return res.status(400).json({error:'Invalid days'});c.expiresAt=new Date(Math.max(Date.now(),Date.parse(c.expiresAt))+days*86400000).toISOString();c.active=true;await saveCustomer(c);res.json({ok:true,expiresAt:c.expiresAt})});
 async function disconnect(id){const s=sessions.get(id);if(s){try{s.end(undefined)}catch{}}sessions.delete(id);runtime.set(id,{connected:false})}
 async function connect(c){if(sessions.has(c.id))return sessions.get(c.id);const authDir=path.join(customerPath(c.id),'session');await fs.mkdir(authDir,{recursive:true});const {state,saveCreds}=await useMultiFileAuthState(authDir);const {version}=await fetchLatestBaileysVersion();const sock=makeWASocket({auth:state,version,printQRInTerminal:false,markOnlineOnConnect:false,syncFullHistory:false});sessions.set(c.id,sock);runtime.set(c.id,{connected:false});sock.ev.on('creds.update',saveCreds);sock.ev.on('connection.update',async u=>{if(u.connection==='open')runtime.set(c.id,{connected:true});if(u.connection==='close'){sessions.delete(c.id);runtime.set(c.id,{connected:false});const current=await loadCustomer(c.id);if(valid(current)&&u.lastDisconnect?.error?.output?.statusCode!==DisconnectReason.loggedOut)setTimeout(()=>connect(current).catch(console.error),3000)}});
-sock.ev.on('messages.upsert',async({messages,type})=>{if(type!=='notify')return;const latest=await loadCustomer(c.id);if(!valid(latest)){await disconnect(c.id);return}for(const m of messages){if(!m.message||m.key.fromMe)continue;const from=m.key.remoteJid;if(!from?.endsWith('@s.whatsapp.net'))continue;const body=m.message.conversation||m.message.extendedTextMessage?.text||'';const cmd=body.trim().split(/\s+/)[0]?.toLowerCase();if(!['.ping','.alive','.spam'].includes(cmd))continue;
+sock.ev.on('messages.upsert',async({messages,type})=>{
+if(type!=='notify')return;
+const latest=await loadCustomer(c.id);
+if(!valid(latest)){await disconnect(c.id);return}
+for(const m of messages){
+if(!m.message||m.key.fromMe)continue;
+const from=m.key.remoteJid;
+if(!from||(!from.endsWith('@s.whatsapp.net')&&!from.endsWith('@lid')))continue;
+const body=messageText(m.message);
+const cmd=body.trim().split(/\s+/)[0]?.toLowerCase();
+if(!['.ping','.alive','.spam'].includes(cmd))continue;
 // .spam command: bounded test, only the account owner's paired phone.
 // Syntax: .spam 2348012345678 5 Hello
 if(cmd==='.spam'){
@@ -96,7 +115,10 @@ if(cmd==='.spam'){
   continue;
 }
 const reply=cmd==='.ping'?'Pong 🏓':'Bot is alive ✅';
-await sock.sendMessage(from,{text:reply},{quoted:m}).catch(console.error)}});return sock}
+await sock.sendMessage(from,{text:reply},{quoted:m}).catch(console.error)
+}
+}).catch(err=>console.error('Message handler failed',err));
+return sock}
 app.post('/api/client/pair',clientAuth,async(req,res)=>{const c=req.customer;const phone=cleanPhone(req.body.phone);if(!/^\d{8,15}$/.test(phone))return res.status(400).json({error:'Enter full international phone number'});if(c.phone&&c.phone!==phone)return res.status(403).json({error:'License already bound to another phone; contact admin'});if(!c.phone){c.phone=phone;await saveCustomer(c)}try{const sock=await connect(c);if(sock.authState.creds.registered)return res.json({status:'already paired',connected:runtime.get(c.id)?.connected||false});await new Promise(r=>setTimeout(r,1500));const code=await sock.requestPairingCode(phone);res.json({pairingCode:code,expiresAt:c.expiresAt})}catch(e){res.status(503).json({error:'Pairing unavailable; retry shortly',detail:String(e.message||e)})}});
 app.get('/api/client/status',clientAuth,(req,res)=>res.json({connected:runtime.get(req.customer.id)?.connected||false,expiresAt:req.customer.expiresAt,phone:req.customer.phone}));
 const testLocks=new Set();const sleep=ms=>new Promise(r=>setTimeout(r,ms));
