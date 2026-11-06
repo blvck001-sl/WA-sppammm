@@ -1,0 +1,1 @@
+{"name":"baileys-railway-multitenant","version":"1.0.0","type":"module","scripts":{"start":"node server.js"},"dependencies":{"@whiskeysockets/baileys":"^6.7.21","express":"^4.21.2","qrcode":"^1.5.4"},"engines":{"node":">=20"}}
